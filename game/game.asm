@@ -1,0 +1,555 @@
+org 0x7c00
+bits 16
+
+xor ax,ax ; se pone a 0
+mov ds,ax ; DS=0
+mov es,ax ; la pila inicia en 0
+
+mov bx,0x8000 ; memoria de video de texto
+cli
+mov ss,bx
+mov sp,ax
+sti
+
+cld
+clc
+
+;clear 0x7E00 so we can check is code loaded later
+xor ah,ah
+mov BYTE [0x7E00], AH
+
+;this code suppose to load game into memory
+mov ah,0x2
+mov al,0x4
+xor ch,ch
+mov cl,0x2
+xor dh,dh
+xor bx,bx
+mov es,bx
+mov bx,0x7E00
+int 0x13
+;code above should load code just above bootloader
+;check if code is loaded
+mov AH,[0x7E00]
+cmp AH,0x0
+je error
+
+;Use normal jumpbecause bochs doesnt support Far Jumps (code often crashes)
+jmp 0x7E00
+;if cpu dont jump somehow then it will execute error and then hopefully halt
+error:
+    ;fill the screen with red color - the screen is supposed to run in graphics mode 0x2
+    mov ah,0x40
+    mov al,' '
+    cld
+    mov bx,0xb800
+    mov es,bx
+    xor bx,bx
+    mov di,bx
+    mov cx,0x0FA0
+    rep stosw
+    stosw
+
+cli
+hlt
+
+times 0x1fe-($-$$) db 0
+dw 0xaa55
+
+;==============================
+; Game code
+;==============================
+
+;the game is designed to run in 16 bit real mode
+;hide text mode cursor
+mov ah,0x1
+mov cx,0x2607
+int 0x10
+;show 'menu'
+call clearTextModeScr
+xor ax,ax
+mov DS,AX
+mov AX,GameName
+mov SI,AX
+xor AL,AL
+mov bl,0x10
+call printInTextMode
+mov AX,TextInfo01
+mov si,ax
+mov al,0x6
+call printInTextMode
+mov AX,TextInfo02
+mov si,ax
+mov al,0x7
+call printInTextMode
+mov AX,TextInfo03
+mov si,ax
+mov al,0x8
+call printInTextMode
+mov AX,TextInfo04
+mov si,ax
+mov al,0x9
+call printInTextMode
+mov AX,TextInfo05
+mov si,ax
+mov al,0xA
+call printInTextMode
+mov AX,TextInfo06
+mov si,ax
+mov al,0xB
+call printInTextMode
+mov AX,TextInfo07
+mov si,ax
+mov al,0x17
+call printInTextMode
+
+;wait for x to start the game
+mov bl,'x'
+call waitForKeyPress
+;init 0x13 graphics mode
+call initGraphicsMode
+
+main_loop:
+    ;draw ship
+    xor ax,ax
+    mov ds,ax
+    mov si,ship
+    mov bx, [shipPosX]
+    mov al, [shipPosY]
+    call DrawPicture
+
+    call ShowGameInfo
+
+    call KeyPressControl
+
+    jmp main_loop
+
+main_exit:
+    call initTextMode
+    jc end_of_program
+    ; hide text mode cursor
+    mov ah, 0x1
+    mov cx, 0x2607
+    int 0x10
+    ; clear the screen
+    call clearTextModeScr
+    ; write exit message
+    xor ax, ax
+    mov ds, ax
+    mov ax, ExitMessage
+    mov si, ax
+    xor al, al
+    xor bl, bl
+    call printInTextMode
+
+end_of_program:
+    cli
+    hlt
+
+
+;==============================
+; Game functions
+;==============================
+
+ShowGameInfo:
+    ret
+
+;this function will update new location of ship on screen according to player keypress
+;this function will be using BIOS buffer from keyboard to not suspend the game
+KeyPressControl:
+    pusha
+    pushf
+    mov ah,0x1
+    int 0x16
+    jz .end
+    cmp al,'a' ;left
+    je .left
+    cmp al,'d' ;right
+    je .right
+    cmp al,'s' ;backwards
+    je .backwards
+    cmp al,'w' ;forwards
+    je .forwards
+    cmp al,'x' ;exit
+    je main_exit
+    jmp .end
+    .left:
+        call clearKeyBUffer
+        cmp WORD [shipPosX], 0x00
+        je .end
+        dec WORD [shipPosX]
+        jmp .end
+    .right:
+        call clearKeyBUffer
+        cmp WORD [shipPosX], 0x12D
+        je .end
+        inc WORD [shipPosX]
+        jmp .end
+    .backwards:
+        call clearKeyBUffer
+        cmp BYTE [shipPosY], 0xA9
+        je .end
+        inc BYTE [shipPosY]
+        jmp .end
+    .forwards:
+        call clearKeyBUffer
+        cmp BYTE [shipPosY], 0x00
+        je .end
+        dec BYTE [shipPosY]
+        jmp .end
+    .end:
+        popf
+        popa
+        ret
+
+clearKeyBUffer:
+    mov ah,0x0
+    int 0x16
+    ret
+
+;this function winn wait till right key is pressed
+;bl - ASCII key
+
+;All registers and flags should be left the same
+waitForKeyPress:
+    pusha
+    pushf
+    .loop:
+        xor ah,ah
+        int 0x16
+        cmp al,bl
+        jne .loop
+    popf
+    popa
+    ret
+
+
+;this function will clear text mode screen to white text with black background
+
+;All registers should be left the same
+clearTextModeScr:
+    pusha
+    mov ah,0x0F
+    mov al,' '
+    cld
+    mov bx,0xb800
+    mov es,bx
+    xor bx,bx
+    mov di,bx
+    mov cx,0x0FA0
+    rep stosw
+    stosw
+    popa
+    ret
+
+;holy shit
+
+;this function will generate pseudo random value
+; Following registers will be changed:
+;   AX - random generated number
+random:
+    push DX
+    push BX
+    ;multiplier is get by Read Time Stamp
+    RDTSC
+    mov BX,AX
+    mov AX,[randomSeed]
+    mul BX
+    add ax,0xB7FF
+    and ax,0x7FFF
+    ;ax is random number
+    mov WORD [randomSeed], ax
+    pop BX
+    pop DX
+    ret
+
+
+
+;this function will draw image on screen
+;DS:SI - address of the picture start
+;AL - Y coordinate (height)
+;BX - X coordinate (width)
+
+;Note that this funciton wont check for 0x13 graphics mode
+DrawPicture:
+    pusha
+    mov cx,0x140
+    mul cx
+    add AX,BX
+    ;AX is now offset on the screen
+    mov bx,0xA000
+    mov es,bx
+    mov di,ax
+    ;memory location of screen is now written in ES:DI
+    ;now we need to get the size of picture
+    lodsw ;get WORD into AX
+    ;AL - X size
+    ;AH - Y size
+    xor cx,cx
+    mov CL,AL
+    cld
+    .loopY:
+        push ax
+        push es
+        push di
+        push cx
+        .loopX:
+            lodsb
+            stosb
+            loop .loopX
+        pop cx
+        pop di
+        pop es
+        mov ax,0x140
+        add di,ax
+        pop ax
+        dec ah
+        cmp ah,0x0
+        jne .loopY
+    popa
+    ret
+
+;this function will draw box on screen
+;AL - Y coordinate (height)
+;BX - X coordinate (width)
+;CL - X size
+;DL - colour
+;DH - Y size
+
+;All registers should be left the same
+DrawBox:
+    pusha
+    ;calculate the start point in memory
+    ;multiply Y coordinate by 0x140 (width of each Y line)
+    push bx
+    mov bx,0x140
+    mul bx
+    pop bx
+    ;add X
+    add AX,BX
+    ;AX is now offset on the screen
+    mov bx,0xA000
+    mov es,bx
+    mov di,ax
+    cld
+    xor CH,CH
+    .loopY:
+        push es
+        push di
+        push cx
+        ;.loopX will be repeated `CL` times
+        .loopX:
+            stosb
+            loop .loopX
+        pop cx
+        pop di
+        pop es
+        mov ax,0x140
+        add di,ax
+        ;decrease dh
+        dec dh
+        ;repeat loop `DH` times
+        cmp dh,0x0
+        jne .loopY
+    popa
+    ret
+
+;this function will return length of string in CX
+;DS:SI - address of the text
+
+; Following registers will be changed
+;   DS:SI   - location of last byte of the string in memory
+;   CX      - length of the string
+getStringLenght:
+    push ax
+    xor cx,cx
+    .loop:
+        lodsb
+        ;check is it terminate character
+        cmp al,'#'
+        ;if yes then finish
+        je .end
+        ;increase CX (length) and execute loop again
+        inc cx
+        jmp .loop
+    .end:
+        pop ax
+        ret
+
+
+;this function will not check is text mode set
+;DS:SI - address of the text
+;AL - Y coordinate (start)
+;BL - X coordinate (start)
+
+;text should be terminated with # sign
+;
+;All registers and flags should be left the same
+printInTextMode:
+    pusha
+    pushf
+    push bx
+    mov bl,0x50
+    mul bl
+    pop bx
+    xor bh,bh
+    add ax,bx
+    mov bx,0x2
+    mul bx
+    mov di,ax
+    mov bx,0xb800
+    mov es,bx
+    mov ah,0x0F ;white colour on black background
+    cld
+    .loop:
+        lodsb
+        cmp al,'#'
+        je .end
+        stosw
+        jmp .loop
+    .end:
+        popf
+        popa
+        ret
+
+SYSerror:
+    ;set text mode graphics
+    call initTextMode
+    ;if text mode graphics could not be set, then halt the CPU straight away
+    jc .fullerror
+    ;fill the screen with red color
+    mov ah,0x40
+    mov al,' '
+    cld
+    mov bx,0xb800
+    mov es,bx
+    xor bx,bx
+    mov di,bx
+    mov cx,0x0FA0
+    rep stosw
+    stosw
+    ;halt the CPU
+    .fullerror:
+        cli
+        hlt
+
+;if error occured then carry flag will be set
+;if function runned properly then carry flag will be cleared
+;
+;All registers should be left the same
+initTextMode:
+    pusha
+    ;setgup graphics mode 0x02
+    xor ah,ah
+    mov al,0x2
+    int 0x10
+    ;get graphics mode
+    mov ah,0x0F
+    int 0x10
+    ;check if the graphics mode is actually 0x02
+    cmp al,0x02
+    jne .err
+    ;clear carry flag and return
+    popa
+    clc
+    ret
+    ;error set carry flag and return
+    .err:
+        popa
+        stc
+        ret
+
+
+;if error occured then carry flag will be set
+;if function runned properly then carry flag will be cleared
+;
+;All registers should be left the same
+initGraphicsMode:
+    pusha
+    ;setup mode 0x13
+    xor ah,ah
+    mov al,0x13
+    int 0x10
+    ;get graphics mode
+    mov ah,0x0F
+    int 0x10
+    ;check if the graphics mode is actually 0x13
+    cmp al,0x13
+    jne .err
+    popa
+    clc
+    ret
+    .err:
+        popa
+        stc
+        ret
+
+
+cli
+hlt
+;game data
+;'variables'
+
+randomSeed dw 0xBEAF
+shipPosX dw 0x80
+shipPosY db 0x80
+
+
+;Game texts
+GameName db 'Lasers Lasers Lasers... And Even More Lasers#'
+TextInfo01 db 'Controls:#'
+TextInfo02 db 'A - Left#'
+TextInfo03 db 'D - Right#'
+TextInfo04 db 'W - Forward#'
+TextInfo05 db 'S - Backward#'
+TextInfo06 db 'Q - Weapon#'
+TextInfo07 db 'Press X to begin game#'
+
+ExitMessage db 'Good bye!#'
+TestMessage db 'Lorem Ipsum#'
+
+;Game Pictures... YES PICTURES
+
+
+;structure of pictures
+;First WORD is size of picture. It is in following format
+
+;ship 17x29 (0x11 * 0x1D) (1D is height, 11 is width)
+
+ship:
+    dw 0x1F13
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0F, 0x2A, 0x1E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0F, 0x2A, 0x29, 0x29, 0x1E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0F, 0x2A, 0x29, 0x29, 0x1E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0F, 0x2A, 0x29, 0x29, 0x1E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0F, 0x0F, 0x29, 0x0F, 0x1E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0F, 0x0F, 0x0F, 0x0F, 0x1E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x1E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x1E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x1E, 0x00, 0x00, 0x00, 0x00, 0x00
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x1E, 0x00, 0x00, 0x00, 0x00, 0x00
+    db 0x00, 0x00, 0x00, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x1E, 0x00, 0x00, 0x00
+    db 0x00, 0x00, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x1E, 0x00, 0x00
+    db 0x00, 0x00, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x1E, 0x00, 0x00
+    db 0x00, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x1E, 0x00
+    db 0x00, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x1E, 0x00
+    db 0x00, 0x0F, 0x0F, 0x0F, 0x2A, 0x2A, 0x2A, 0x1E, 0x0F, 0x0F, 0x0F, 0x0F, 0x2A, 0x2A, 0x2A, 0x1E, 0x0F, 0x1E, 0x00
+    db 0x00, 0x00, 0x0F, 0x29, 0x2A, 0x2A, 0x2A, 0x29, 0x1E, 0x0F, 0x0F, 0x29, 0x2A, 0x2A, 0x2A, 0x29, 0x1E, 0x00, 0x00
+    db 0x00, 0x00, 0x0F, 0x29, 0x29, 0x2A, 0x29, 0x29, 0x1E, 0x0F, 0x0F, 0x29, 0x29, 0x2A, 0x29, 0x29, 0x1E, 0x00, 0x00
+    db 0x00, 0x00, 0x00, 0x29, 0x29, 0x2A, 0x29, 0x29, 0x00, 0x1E, 0x00, 0x29, 0x29, 0x2A, 0x29, 0x29, 0x00, 0x00, 0x00
+    db 0x00, 0x00, 0x00, 0x29, 0x29, 0x29, 0x29, 0x29, 0x00, 0x1E, 0x00, 0x29, 0x29, 0x29, 0x29, 0x29, 0x00, 0x00, 0x00
+    db 0x00, 0x00, 0x00, 0x00, 0x29, 0x29, 0x29, 0x00, 0x00, 0x1E, 0x00, 0x00, 0x29, 0x29, 0x29, 0x00, 0x00, 0x00, 0x00
+    db 0x00, 0x00, 0x00, 0x00, 0x29, 0x29, 0x29, 0x00, 0x00, 0x00, 0x00, 0x00, 0x29, 0x29, 0x29, 0x00, 0x00, 0x00, 0x00
+    db 0x00, 0x00, 0x00, 0x00, 0x29, 0x29, 0x29, 0x00, 0x00, 0x00, 0x00, 0x00, 0x29, 0x29, 0x29, 0x00, 0x00, 0x00, 0x00
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x29, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x29, 0x00, 0x00, 0x00, 0x00, 0x00
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x29, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x29, 0x00, 0x00, 0x00, 0x00, 0x00
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x29, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x29, 0x00, 0x00, 0x00, 0x00, 0x00
+    db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+
+
+
+times 0x1000 - ($ - $$) db 0x0
